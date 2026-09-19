@@ -8,7 +8,10 @@
 #   2. target/linux/rockchip/image/armv8.mk
 #          Device/onething_oec + TARGET_DEVICES
 #   3. package/boot/uboot-rockchip/Makefile
-#          U-Boot/onething-oec-rk3566 + BOOTLOADERS entry   (--own-uboot only)
+#          minimal      - add onething_oec to U-Boot/nanopi-r3s-rk3566's
+#                         BUILD_DEVICES, so its kconfig default fires for us
+#          --own-uboot  - add a whole new U-Boot/onething-oec-rk3566 board
+#                         + BOOTLOADERS entry
 #
 # Two modes:
 #   (default)      minimal  - reuse the existing nanopi-r3s-rk3566 U-Boot blob.
@@ -51,7 +54,7 @@ echo "      rk3566-onething-edge-cube.dts  ($(wc -c < "$HERE/files/rk3566-onethi
 
 # ------------------------------------------------------------- 2+3. make edits
 echo "[2/3] armv8.mk  Device/onething_oec"
-echo "[3/3] uboot-rockchip/Makefile  $([ $OWN_UBOOT -eq 1 ] && echo 'U-Boot/onething-oec-rk3566' || echo '(skipped in minimal mode)')"
+echo "[3/3] uboot-rockchip/Makefile  $([ $OWN_UBOOT -eq 1 ] && echo 'U-Boot/onething-oec-rk3566 + BOOTLOADERS' || echo 'U-Boot/nanopi-r3s-rk3566  BUILD_DEVICES += onething_oec')"
 
 OWN="$OWN_UBOOT" python3 - "$IMM" "$DRY" <<'PY'
 import os, sys, io
@@ -103,7 +106,38 @@ else:
 ub = os.path.join(imm, "package/boot/uboot-rockchip/Makefile")
 s = read(ub)
 if not own:
-    print("      uboot    : minimal mode, untouched")
+    # minimal mode: reuse the R3S U-Boot blob -- but teach it about our device.
+    #
+    # U-Boot/Default sets HIDDEN:=1, and scripts/package-metadata.pl renders a
+    # hidden package as a prompt-less `bool`:
+    #
+    #     config PACKAGE_u-boot-nanopi-r3s-rk3566
+    #             bool                                   <-- no prompt!
+    #             default y if DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566
+    #
+    # A prompt-less kconfig symbol CANNOT be set from .config, so writing
+    # CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566=y is silently discarded (verified:
+    # it comes out MISS after `make defconfig`).  The only supported way in is
+    # the `default y if (... DEVICE_<board>)` rule that include/u-boot.mk
+    # (lines 102-104) derives from BUILD_DEVICES.  So register our device there.
+    if "onething_oec" in s:
+        print("      uboot    : onething_oec already referenced, skipped")
+    else:
+        anchor = ("define U-Boot/nanopi-r3s-rk3566\n"
+                  "  $(U-Boot/rk3566/Default)\n"
+                  "  NAME:=NanoPi R3S\n"
+                  "  BUILD_DEVICES:= \\\n"
+                  "    friendlyarm_nanopi-r3s\n"
+                  "endef\n")
+        if anchor not in s:
+            print("      uboot    : ANCHOR NOT FOUND (U-Boot/nanopi-r3s-rk3566) - aborting this file")
+        else:
+            repl = anchor.replace("    friendlyarm_nanopi-r3s\n",
+                                  "    friendlyarm_nanopi-r3s \\\n    onething_oec\n", 1)
+            s = s.replace(anchor, repl, 1)
+            write(ub, s)
+            changed.append("uboot-rockchip/Makefile")
+            print("      uboot    : BUILD_DEVICES += onething_oec (makes the R3S blob default y)")
 else:
     if "U-Boot/onething-oec-rk3566" in s:
         print("      uboot    : board already present, skipped")

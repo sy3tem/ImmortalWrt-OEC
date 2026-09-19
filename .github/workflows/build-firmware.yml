@@ -99,16 +99,22 @@ jobs:
           EXTRA="${{ github.event.inputs.extra_packages || '' }}"
 
           # ---------------------------------------------------------------
-          # Why the u-boot package is listed explicitly:
+          # How the U-Boot blob gets selected:
           #
           #   Device/onething_oec  ->  UBOOT_DEVICE_NAME := nanopi-r3s-rk3566
           #   Build/pine64-img     ->  dd if=$(STAGING_DIR_IMAGE)/\
           #                               $(UBOOT_DEVICE_NAME)-u-boot-rockchip.bin
           #
-          # U-Boot/nanopi-r3s-rk3566 declares BUILD_DEVICES := friendlyarm_nanopi-r3s,
-          # so include/u-boot.mk only auto-selects it when THAT device is chosen.
-          # Our device is onething_oec, so we must select it by hand or the
-          # image step dies with "No such file or directory".
+          # The blob comes from package `u-boot-nanopi-r3s-rk3566`, which is
+          # HIDDEN (U-Boot/Default sets HIDDEN:=1 -> rendered by
+          # scripts/package-metadata.pl as a prompt-less `bool`) and therefore
+          # CANNOT be forced on from .config.  apply-to-immortalwrt.sh registers
+          # onething_oec in that board's BUILD_DEVICES instead, so the
+          # `default y if (..._DEVICE_onething_oec)` rule fires.
+          #
+          # The CONFIG_PACKAGE_... line below is harmless belt-and-braces; it is
+          # expected to be dropped by kconfig, which is exactly why the
+          # verification step inspects the metadata rather than .config.
           # ---------------------------------------------------------------
           gen_config() {
             echo "CONFIG_TARGET_rockchip=y"
@@ -134,34 +140,51 @@ jobs:
           make defconfig
 
           # ---------------------------------------------------------------
-          # Fail fast: a missing symbol here would otherwise burn ~5h and then
-          # die at the very last image-packaging step.
+          # Fail fast.  Two different kinds of check, because the two symbols
+          # live in different worlds:
+          #
+          #   * the device symbol has a prompt  -> it shows up in .config
+          #   * u-boot packages are HIDDEN      -> prompt-less `bool`, so they
+          #     NEVER show up as CONFIG_PACKAGE_...=y; they are pulled in by
+          #     `default y if DEFAULT_PACKAGE_...`.  Inspect the metadata.
           # ---------------------------------------------------------------
           missing=0
-          for sym in \
-              CONFIG_TARGET_rockchip_armv8_DEVICE_onething_oec \
-              CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566 ; do
-            if grep -q "^${sym}=y" .config; then
-              echo "OK   $sym"
-            else
-              echo "MISS $sym"
-              missing=1
-            fi
-          done
+
+          if grep -q '^CONFIG_TARGET_rockchip_armv8_DEVICE_onething_oec=y' .config; then
+            echo "OK   device onething_oec selected"
+          else
+            echo "MISS device onething_oec"; missing=1
+          fi
+
+          UBBLK=$(sed -n '/^config PACKAGE_u-boot-nanopi-r3s-rk3566$/,/^$/p' tmp/.config-package.in)
+          DEFBLK=$(sed -n '/^config DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566$/,/^$/p' tmp/.config-package.in)
+          echo "--- PACKAGE_u-boot-nanopi-r3s-rk3566 ---"
+          echo "${UBBLK:-<absent>}"
+          echo "--- DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566 ---"
+          echo "${DEFBLK:-<absent>}"
+
+          if [ -z "$UBBLK" ]; then
+            echo "MISS u-boot-nanopi-r3s-rk3566 not present in package metadata"; missing=1
+          elif ! printf '%s\n' "$DEFBLK" | grep -q 'onething_oec'; then
+            echo "MISS u-boot default rule does not cover onething_oec"; missing=1
+          else
+            echo "OK   u-boot-nanopi-r3s-rk3566 present and defaulted for onething_oec"
+          fi
 
           echo "=== resulting target config ==="
           grep -E '^CONFIG_TARGET_(rockchip|BOARD|SUBTARGET|ARCH_PACKAGES)' .config || true
           grep -E '^CONFIG_TARGET_rockchip_armv8_DEVICE_' .config || true
-          grep -E '^CONFIG_PACKAGE_u-boot-|^CONFIG_PACKAGE_trusted-firmware' .config || true
+          grep -E '^CONFIG_PACKAGE_trusted-firmware-a' .config || true
 
           if [ "$missing" = "1" ]; then
-            echo "--- u-boot packages known to the build system ---"
-            { grep -o 'PACKAGE_u-boot-[A-Za-z0-9._-]*' tmp/.config-package.in \
-                | sort -u | head -60 ; } || true
+            echo "--- rockchip u-boot packages in metadata ---"
+            { grep -n 'config PACKAGE_u-boot-.*rk35' tmp/.config-package.in || true ; }
+            echo "--- every metadata line mentioning onething_oec ---"
+            { grep -n 'onething_oec' tmp/.config-package.in || true ; }
             echo "--- devices listed for rockchip/armv8 ---"
             { ./scripts/dump-target-info.pl devices rockchip/armv8 2>/dev/null \
                 | head -40 ; } || true
-            echo "FATAL: required config symbols are missing after defconfig"
+            echo "FATAL: required config/metadata checks failed"
             exit 1
           fi
 
