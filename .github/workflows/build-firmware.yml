@@ -30,7 +30,6 @@ on:
     paths:
       - 'files/**'
       - 'apply-to-immortalwrt.sh'
-      - '.github/workflows/build-firmware.yml'
 
 permissions:
   contents: read
@@ -38,7 +37,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    # GitHub-hosted runners hard-cap a single job at 360 min.
+    timeout-minutes: 355
 
     steps:
       - name: Free up disk space
@@ -98,30 +98,76 @@ jobs:
           LUCI="${{ github.event.inputs.include_luci || 'true' }}"
           EXTRA="${{ github.event.inputs.extra_packages || '' }}"
 
-          # start from the target's own defaults, then narrow to one device
-          echo "CONFIG_TARGET_rockchip=y"                              >> .config
-          echo "CONFIG_TARGET_rockchip_armv8=y"                        >> .config
-          echo "CONFIG_TARGET_rockchip_armv8_DEVICE_onething_oec=y"    >> .config
+          # ---------------------------------------------------------------
+          # Why the u-boot package is listed explicitly:
+          #
+          #   Device/onething_oec  ->  UBOOT_DEVICE_NAME := nanopi-r3s-rk3566
+          #   Build/pine64-img     ->  dd if=$(STAGING_DIR_IMAGE)/\
+          #                               $(UBOOT_DEVICE_NAME)-u-boot-rockchip.bin
+          #
+          # U-Boot/nanopi-r3s-rk3566 declares BUILD_DEVICES := friendlyarm_nanopi-r3s,
+          # so include/u-boot.mk only auto-selects it when THAT device is chosen.
+          # Our device is onething_oec, so we must select it by hand or the
+          # image step dies with "No such file or directory".
+          # ---------------------------------------------------------------
+          gen_config() {
+            echo "CONFIG_TARGET_rockchip=y"
+            echo "CONFIG_TARGET_rockchip_armv8=y"
+            echo "CONFIG_TARGET_rockchip_armv8_DEVICE_onething_oec=y"
+            echo "CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566=y"
+            echo "CONFIG_PACKAGE_trusted-firmware-a-rk3566=y"
+            echo "CONFIG_CCACHE=y"
 
-          if [ "$LUCI" = "true" ]; then
-            echo "CONFIG_PACKAGE_luci=y"                               >> .config
-            echo "CONFIG_PACKAGE_luci-ssl=y"                           >> .config
-            echo "CONFIG_PACKAGE_luci-theme-bootstrap=y"               >> .config
-            echo "CONFIG_PACKAGE_luci-app-firewall=y"                  >> .config
-          fi
+            if [ "$LUCI" = "true" ]; then
+              echo "CONFIG_PACKAGE_luci=y"
+              echo "CONFIG_PACKAGE_luci-ssl=y"
+              echo "CONFIG_PACKAGE_luci-theme-bootstrap=y"
+              echo "CONFIG_PACKAGE_luci-app-firewall=y"
+            fi
 
-          for p in $EXTRA; do
-            echo "CONFIG_PACKAGE_$p=y" >> .config
-          done
+            for p in $EXTRA; do
+              echo "CONFIG_PACKAGE_$p=y"
+            done
+          }
 
+          gen_config >> .config
           make defconfig
+
+          # ---------------------------------------------------------------
+          # Fail fast: a missing symbol here would otherwise burn ~5h and then
+          # die at the very last image-packaging step.
+          # ---------------------------------------------------------------
+          missing=0
+          for sym in \
+              CONFIG_TARGET_rockchip_armv8_DEVICE_onething_oec \
+              CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566 ; do
+            if grep -q "^${sym}=y" .config; then
+              echo "OK   $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
 
           echo "=== resulting target config ==="
           grep -E '^CONFIG_TARGET_(rockchip|BOARD|SUBTARGET|ARCH_PACKAGES)' .config || true
           grep -E '^CONFIG_TARGET_rockchip_armv8_DEVICE_' .config || true
+          grep -E '^CONFIG_PACKAGE_u-boot-|^CONFIG_PACKAGE_trusted-firmware' .config || true
+
+          if [ "$missing" = "1" ]; then
+            echo "--- u-boot packages known to the build system ---"
+            { grep -o 'PACKAGE_u-boot-[A-Za-z0-9._-]*' tmp/.config-package.in \
+                | sort -u | head -60 ; } || true
+            echo "--- devices listed for rockchip/armv8 ---"
+            { ./scripts/dump-target-info.pl devices rockchip/armv8 2>/dev/null \
+                | head -40 ; } || true
+            echo "FATAL: required config symbols are missing after defconfig"
+            exit 1
+          fi
+
           echo "=== device profile sanity ==="
-          ./scripts/dump-target-info.pl devices rockchip/armv8 2>/dev/null | grep -i onething || \
-            echo "(dump-target-info did not list it; continuing)"
+          { ./scripts/dump-target-info.pl devices rockchip/armv8 2>/dev/null \
+              | grep -i onething ; } || echo "(dump-target-info did not list it; continuing)"
 
       - name: Download sources
         working-directory: imm
@@ -129,7 +175,12 @@ jobs:
 
       - name: Build firmware
         working-directory: imm
-        run: make -j"$(nproc)" V=s
+        run: |
+          # GitHub's default shell already runs bash with -e -o pipefail,
+          # so a failure inside `make` propagates through `tee`.
+          make -j"$(nproc)" V=s 2>&1 | tee build.log
+          echo "=== build finished ==="
+          ls -lh bin/targets/rockchip/armv8/ | head -40
 
       - name: Collect artifacts
         run: |
@@ -137,6 +188,7 @@ jobs:
           cp imm/bin/targets/rockchip/armv8/*onething_oec* out/ 2>/dev/null || true
           cp imm/bin/targets/rockchip/armv8/sha256sums out/ 2>/dev/null || true
           cp imm/bin/targets/rockchip/armv8/profiles.json out/ 2>/dev/null || true
+          cp imm/build.log out/build.log 2>/dev/null || true
           echo "=== artifacts ==="
           ls -lh out/
           if ! ls out/*onething_oec* >/dev/null 2>&1; then
@@ -147,8 +199,11 @@ jobs:
         if: failure()
         run: |
           echo "=== last 200 lines of build log ==="
+          tail -200 imm/build.log 2>/dev/null || true
+          echo "=== last 200 lines of any openwrt log ==="
           tail -200 imm/logs/*.txt 2>/dev/null || true
-          tail -200 imm/.config 2>/dev/null || true
+          echo "=== .config head ==="
+          head -60 imm/.config 2>/dev/null || true
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
