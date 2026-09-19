@@ -156,16 +156,16 @@ jobs:
             echo "MISS device onething_oec"; missing=1
           fi
 
-          UBBLK=$(sed -n '/^config PACKAGE_u-boot-nanopi-r3s-rk3566$/,/^$/p' tmp/.config-package.in)
-          DEFBLK=$(sed -n '/^config DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566$/,/^$/p' tmp/.config-package.in)
+          # NOTE: tmp/.config-package.in is TAB-indented, so the pattern must
+          # tolerate leading whitespace -- an anchored /^config .../ never
+          # matches and silently reports <absent>.
+          UBBLK=$(sed -n '/^[[:space:]]*config PACKAGE_u-boot-nanopi-r3s-rk3566$/,/^[[:space:]]*$/p' tmp/.config-package.in)
           echo "--- PACKAGE_u-boot-nanopi-r3s-rk3566 ---"
           echo "${UBBLK:-<absent>}"
-          echo "--- DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566 ---"
-          echo "${DEFBLK:-<absent>}"
 
           if [ -z "$UBBLK" ]; then
             echo "MISS u-boot-nanopi-r3s-rk3566 not present in package metadata"; missing=1
-          elif ! printf '%s\n' "$DEFBLK" | grep -q 'onething_oec'; then
+          elif ! printf '%s\n' "$UBBLK" | grep -q 'onething_oec'; then
             echo "MISS u-boot default rule does not cover onething_oec"; missing=1
           else
             echo "OK   u-boot-nanopi-r3s-rk3566 present and defaulted for onething_oec"
