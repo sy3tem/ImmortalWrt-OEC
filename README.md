@@ -106,26 +106,70 @@ ImmortalWrt 的 `package/boot/uboot-rockchip/Makefile` 用 `PKG_VERSION:=2026.07
 1. 把 `PKG_VERSION` 提到 v2026.10（上游已自带 OEC dts，最干净），或
 2. 给 `uboot-rockchip` 加补丁，把 OEC 的 dts / `-u-boot.dtsi` / defconfig 注入 v2026.07 源码
 
-### 必须显式选 U-Boot 包
+### U-Boot 包是 HIDDEN —— 不能用 `.config` 选它
 
-`Build/pine64-img` 会做：
+`Build/pine64-img`（`target/linux/rockchip/image/Makefile:43`）会做：
 
 ```make
 dd if="$(STAGING_DIR_IMAGE)"/$(UBOOT_DEVICE_NAME)-u-boot-rockchip.bin of="$@" seek=64 conv=notrunc
 ```
 
-`Device/onething_oec` 设了 `UBOOT_DEVICE_NAME := nanopi-r3s-rk3566`，但
-`U-Boot/nanopi-r3s-rk3566` 的 `BUILD_DEVICES := friendlyarm_nanopi-r3s` —— 也就是说
-`include/u-boot.mk`（第 92 / 102-104 行，`Package/u-boot-$(1)` + `DEFAULT := y if ...`）
-**只在你选了 NanoPi R3S 那个设备时才自动带上它**。我们的设备是 `onething_oec`，所以必须手写：
+`Device/onething_oec` 设了 `UBOOT_DEVICE_NAME := nanopi-r3s-rk3566`，所以这个 blob 必须由
+包 `u-boot-nanopi-r3s-rk3566` 产出（`uboot-rockchip/Makefile:613` 那句
+`$(CP) $(PKG_BUILD_DIR)/u-boot-rockchip.bin $(STAGING_DIR_IMAGE)/$(BUILD_VARIANT)-u-boot-rockchip.bin`）。
+
+**但你不能靠 `.config` 选中它。** 原因链条：
+
+1. `package/boot/uboot-rockchip/Makefile:21-25` 的 `U-Boot/Default` 设了 **`HIDDEN:=1`**
+2. `scripts/package-metadata.pl:353-354` 对 hidden 包做 `$pkg->{hidden} and $title = ""`
+3. 于是生成的 kconfig 是**没有 prompt 的 `bool`**：
 
 ```
-CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566=y
-CONFIG_PACKAGE_trusted-firmware-a-rk3566=y
+	config PACKAGE_u-boot-nanopi-r3s-rk3566
+		bool
+		default y if DEFAULT_PACKAGE_u-boot-nanopi-r3s-rk3566
+		default y if (TARGET_rockchip_armv8_Default || \
+		              TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r3s || \
+		              TARGET_rockchip_armv8_DEVICE_onething_oec || ...)
 ```
+
+**prompt-less 的 kconfig symbol 无法从 `.config` 赋值** —— 写
+`CONFIG_PACKAGE_u-boot-nanopi-r3s-rk3566=y` 会被静默丢弃（实测 `make defconfig` 之后
+该符号根本不出现在 `.config` 里）。
+
+**正确做法**：把设备名注册进 `BUILD_DEVICES`，让 `include/u-boot.mk:102-104` 推导出的
+`default y if (..._DEVICE_<board>)` 条件成立。`apply-to-immortalwrt.sh` 就是这么做的：
+
+```make
+define U-Boot/nanopi-r3s-rk3566
+  $(U-Boot/rk3566/Default)
+  NAME:=NanoPi R3S
+  BUILD_DEVICES:= \
+    friendlyarm_nanopi-r3s \
+    onething_oec          # <- 加这一行
+endef
+```
+
+> 同理适用于**任何 `HIDDEN:=1` 的包**（`trusted-firmware-a`、`optee-os` 都是这套机制）。
 
 漏掉的话，前面编译全部成功，最后打镜像时 `dd` 才报“文件不存在”。
-workflow 已在 `make defconfig` 之后加了断言，**几秒内**就会失败，不会白烧 5 小时。
+workflow 在 `make defconfig` 之后检查 `tmp/.config-package.in` —— **注意该文件是 TAB 缩进的**，
+模式必须写成 `/^[[:space:]]*config .../`，否则永远匹配不到、会报假阴性。几秒内即可失败。
+
+### 构建依赖（容易漏）
+
+`uboot-rockchip/Makefile:14-15` 设了 `UBOOT_USE_BINMAN:=1` 和 `UBOOT_USE_INTREE_DTC:=1`，
+`include/u-boot.mk:23-48` 因此把它们变成**硬性** host 检查：
+
+| 依赖 | 由谁要求 |
+|---|---|
+| `python3-pyelftools` | `UBOOT_USE_BINMAN` |
+| `python3-dev` | `UBOOT_USE_INTREE_DTC` |
+| `python3-setuptools` | `UBOOT_USE_INTREE_DTC` |
+| `swig` | `UBOOT_USE_INTREE_DTC` |
+
+缺任一个都会在 `Checking 'python3-pyelftools'... failed` 处中断构建。
+workflow 已装齐，并额外加了一步 `Verify build prerequisites` 提前报错。
 
 ---
 
@@ -146,17 +190,24 @@ oec-imm/
 
 ## 已验证 / 待验证
 
-**已验证**
+**已在云编译里实证通过**（run 35460326796）
+- `Apply OEC (OneThing Edge Cube) device support` ✓
+- `Apply build config` ✓ → `OK   device onething_oec selected`
+  → `OK   u-boot-nanopi-r3s-rk3566 present and defaulted for onething_oec`
+- `dump-target-info devices rockchip/armv8` 列出 `onething_oec "OneThing Edge Cube (OEC)/OEC Turbo"`
+- `Verify build prerequisites` ✓ ／ `Download sources` ✓
+
+**本地已验证**
 - v7.1 的这份 DTS 在 **linux-6.18.44** 源码树上 cpp+dtc 一次通过（51,164 B，39 个外设节点）
 - v7.1 下同一份 DTS 编出的 DTB 为 52,951 B；`Image` 在 WSL2 上可完整编出（52.4 MB）
-- 应用脚本两种模式 dry-run 均命中锚点，插入逻辑正确
+- 应用脚本两种模式插入逻辑正确，且**幂等**（第二次运行 `files changed: none`）
 - `DEVICE_DTS_DIR = $(DTS_DIR)/rockchip`（`target/linux/rockchip/image/Makefile:75`），
   dts 放在 `files/arch/arm64/boot/dts/rockchip/` 即会被自动编译
-- 上游 U-Boot 两版本的 dts 覆盖情况（见上表，tree API 实测）
+- 上游 U-Boot 两版本的 dts 覆盖情况（见上表，git trees API 实测）
 
-**待验证（需要在完整构建 / 真机里做）**
-- `Device/onething_oec` 能否通过 `make defconfig`（`DEVICE_DTS` 路径解析、`SUPPORTED_DEVICES` 语法）
-- minimal 模式下 R3S 的 U-Boot 能否引导 OEC（DDR 时序、eMMC、PMIC 缺失时的 regulator 路径）
-- `pine64-img` 的 `dd seek=64` 布局对 OEC 的 eMMC 是否合适
+**尚未验证（等这次构建跑完 / 真机）**
+- 内核 6.18 能否带上 OEC dts 编译通过、U-Boot blob 能否产出
+- `pine64-img` 打包是否成功（`dd seek=64` 布局）
+- minimal 模式下 R3S 的 U-Boot 能否真正引导 OEC（DDR 时序、eMMC、**OEC 无 PMIC** 时的 regulator 路径）
 - r306（原厂 eMMC）可能额外需要把 `env.bin` 写到 sector 294912（来自第三方 fork 的打包逻辑，未证实）
 - OEC 的 3 个 RGB LED 在 OpenWrt 里的映射（`base-files/etc/board.d/01_leds`，可选）
