@@ -22,7 +22,7 @@ s.addremove = false
 o = s:option(ListValue, "proto", translate("获取方式"))
 o:value("dhcp", translate("自动获取（DHCP 客户端）"))
 o:value("static", translate("固定 IP（静态地址）"))
-o.default = "dhcp"
+o.default = "static"
 o.rmempty = false
 o.description = translate("自动获取：从上游路由器直接拿地址，插上网线就能用。" ..
                           "固定 IP：手动指定地址，适合当网关或需要固定地址的场景。")
