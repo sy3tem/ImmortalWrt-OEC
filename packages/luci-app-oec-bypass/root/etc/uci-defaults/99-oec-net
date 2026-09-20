@@ -2,8 +2,13 @@
 # ---------------------------------------------------------------------------
 # OEC（OneThing Edge Cube / RK3566）单网口旁路由 —— 首次启动默认值
 #
-# 出厂默认：LAN 口固定 IP 192.168.100.254/24，网关/DNS 指向主路由 192.168.100.1，
-#           并且关闭本机 dnsmasq DHCP 服务。
+# 出厂默认：LAN 口作 **DHCP 客户端**，从上游路由器自动获取 IP；
+#           同时关闭本机 dnsmasq DHCP 服务（旁路由的硬性要求）。
+#
+# 为什么默认用 DHCP 而不是固定 IP：
+#   这个固件要给别人用，别人的网段不一定是 192.168.100.x，写死固定 IP
+#   会让别人插上网线就失联。自动获取最通用、最不容易出问题。
+#   需要固定 IP 的用户可以在 LuCI「网络 -> 旁路由设置」里一键切换。
 #
 # 执行时机：/etc/init.d/boot -> uci_apply_defaults()
 #   /etc/config/network 由 preinit 阶段的 /lib/preinit/82_config_generate 生成
@@ -11,18 +16,18 @@
 #   所以这里对 network.lan 的修改不会被 config_generate 覆盖。
 #
 # 本脚本只在首次启动执行一次；返回 0 后会被 /etc/init.d/boot 自动删除，
-# 因此之后在 LuCI「网络 -> 旁路由设置」里怎么改都不会被重置。
+# 因此之后在 LuCI 里怎么改都不会被重置。
 # ---------------------------------------------------------------------------
 
 # 正常情况下 network 已由 config_generate 生成；没有就留着下次启动再试
 [ -f /etc/config/network ] || exit 1
 
-# --- 1) LAN 口固定 IP：192.168.100.254/24，网关与 DNS 指向主路由 ----------
-uci -q set network.lan.proto='static'
-uci -q set network.lan.ipaddr='192.168.100.254'
-uci -q set network.lan.netmask='255.255.255.0'
-uci -q set network.lan.gateway='192.168.100.1'
-uci -q set network.lan.dns='192.168.100.1'
+# --- 1) LAN 口改为 DHCP 客户端：插上网线即从上游路由器自动获取 IP ---------
+uci -q set network.lan.proto='dhcp'
+uci -q delete network.lan.ipaddr
+uci -q delete network.lan.netmask
+uci -q delete network.lan.gateway
+uci -q delete network.lan.dns
 
 # --- 2) 旁路由：关掉本机 DHCP 服务，避免与主路由抢着发地址 -----------------
 #        单网口设备若同时开着 DHCP server，局域网里就会出现两个 DHCP。
