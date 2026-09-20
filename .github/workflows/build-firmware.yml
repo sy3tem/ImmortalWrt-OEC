@@ -30,6 +30,7 @@ on:
     paths:
       - 'files/**'
       - 'apply-to-immortalwrt.sh'
+      - 'packages/**'
 
 permissions:
   contents: read
@@ -99,6 +100,18 @@ jobs:
           sed -n '/^define Device\/onething_oec/,/^TARGET_DEVICES += onething_oec/p' \
             imm/target/linux/rockchip/image/armv8.mk
 
+      # --------------------------------------------------- 本地 LuCI 应用
+      - name: Install OEC bypass-router LuCI app
+        run: |
+          # 「网络 -> 旁路由设置」这个本地 LuCI 应用必须放进 imm/package/，
+          # 而且要在 `make defconfig` 之前就位，tmp/.config-package.in 才会收录它。
+          # 它同时安装 /etc/uci-defaults/99-oec-net，负责首启把 LAN 设成 DHCP 客户端
+          # 并关掉本机 DHCP 服务（旁路由的硬性要求）。
+          rm -rf imm/package/luci-app-oec-bypass
+          cp -r "$GITHUB_WORKSPACE/packages/luci-app-oec-bypass" imm/package/
+          echo "=== installed files ==="
+          find imm/package/luci-app-oec-bypass -type f | sort
+
       - name: Apply build config
         working-directory: imm
         run: |
@@ -136,6 +149,8 @@ jobs:
               echo "CONFIG_PACKAGE_luci-ssl=y"
               echo "CONFIG_PACKAGE_luci-theme-bootstrap=y"
               echo "CONFIG_PACKAGE_luci-app-firewall=y"
+              # 单网口旁路由设置页（自动获取 / 固定 IP）
+              echo "CONFIG_PACKAGE_luci-app-oec-bypass=y"
             fi
 
             for p in $EXTRA; do
@@ -161,6 +176,16 @@ jobs:
             echo "OK   device onething_oec selected"
           else
             echo "MISS device onething_oec"; missing=1
+          fi
+
+          # 本地包：它是有 prompt 的普通包，应该能直接出现在 .config 里。
+          # 若 MISS，多半是没放进 imm/package/ 或放晚了（defconfig 之后）。
+          if grep -q '^CONFIG_PACKAGE_luci-app-oec-bypass=y' .config; then
+            echo "OK   luci-app-oec-bypass selected"
+          else
+            echo "MISS luci-app-oec-bypass"
+            { grep -n 'luci-app-oec-bypass' tmp/.config-package.in || echo '(absent from package metadata)'; }
+            missing=1
           fi
 
           # NOTE: tmp/.config-package.in is TAB-indented, so the pattern must
